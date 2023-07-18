@@ -7,8 +7,6 @@ import torch
 #from reflib.face.utils import CFaceUtils
 
 class CFacePsringNormLayer(nn.Module):
-
-
     def __init__(self, channels, normalize_shape=None, norm_type='bn'):
         super(CFacePsringNormLayer, self).__init__()
         norm_type = norm_type.lower()
@@ -96,9 +94,6 @@ class CFacePsringConvLayer(nn.Module):
 
 
 class CFacePsringResidualBlock(nn.Module):
-    """
-    Residual block recommended in: http://torch.ch/blog/2016/02/04/resnets.html
-    """
 
     def __init__(self, c_in, c_out, relu_type='prelu', norm_type='bn', scale='none'):
         super(CFacePsringResidualBlock, self).__init__()
@@ -380,22 +375,12 @@ class CFacePsringBiSeNet(nn.Module):
 
 
 class CFaceParsing:
-
     def __init__(self ):
         self.mydata = 0
 
     def init_parsing_model(self, model_name='bisenet', half=False, device='cuda'):
-        # if model_name == 'bisenet':
-        #     model = CFacePsringBiSeNet(num_class=19)
-        #     model_url = 'https://github.com/sczhou/CodeFormer/releases/download/v0.1.0/parsing_bisenet.pth'
-        # elif model_name == 'parsenet':
-        #     model = CFacePsringParseNet(in_size=512, out_size=512, parsing_ch=19)
-        #     model_url = 'https://github.com/sczhou/CodeFormer/releases/download/v0.1.0/parsing_parsenet.pth'
-        # else:
-        #     raise NotImplementedError(f'{model_name} is not implemented.')
-
         model = CFacePsringParseNet(in_size=512, out_size=512, parsing_ch=19)
-        model_path = 'weights/facelib/parsing_parsenet.pth'
+        model_path = 'reflib/model/parsing_parsenet.pth'
         load_net = torch.load(model_path, map_location=lambda storage, loc: storage)
         model.load_state_dict(load_net, strict=True)
         model.eval()

@@ -3,18 +3,10 @@ import numpy as np
 import os
 import torch
 from torchvision.transforms.functional import normalize
-
 from reflib.face.detection import init_detection_model
 from reflib.face.parsing import CFaceParsing
 from reflib.face.utils import CFaceUtils
 
-from basicsr.utils.download_util import load_file_from_url
-from basicsr.utils.misc import get_device
-
-dlib_model_url = {
-    'face_detector': 'https://github.com/sczhou/CodeFormer/releases/download/v0.1.0/mmod_human_face_detector-4cb19393.dat',
-    'shape_predictor_5': 'https://github.com/sczhou/CodeFormer/releases/download/v0.1.0/shape_predictor_5_face_landmarks-c4b1e980.dat'
-}
 
 g_CFaceUtils = CFaceUtils();
 g_CFaceParsing = CFaceParsing()
@@ -56,8 +48,6 @@ def get_center_face(det_faces, h=0, w=0, center=None):
 
 
 class CFaceRestoration(object):
-    """Helper for the face restoration pipeline (base class)."""
-
     def __init__(self,
                  upscale_factor,
                  face_size=512,
@@ -76,23 +66,8 @@ class CFaceRestoration(object):
         self.face_size = (int(face_size * self.crop_ratio[1]), int(face_size * self.crop_ratio[0]))
         self.det_model = det_model
 
-        if self.det_model == 'dlib':
-            # standard 5 landmarks for FFHQ faces with 1024 x 1024
-            self.face_template = np.array([[686.77227723, 488.62376238], [586.77227723, 493.59405941],
-                                        [337.91089109, 488.38613861], [437.95049505, 493.51485149],
-                                        [513.58415842, 678.5049505]])
-            self.face_template = self.face_template / (1024 // face_size)
-        elif self.template_3points:
-            self.face_template = np.array([[192, 240], [319, 240], [257, 371]])
-        else:
-            # standard 5 landmarks for FFHQ faces with 512 x 512 
-            # facexlib
-            self.face_template = np.array([[192.98138, 239.94708], [318.90277, 240.1936], [256.63416, 314.01935],
-                                           [201.26117, 371.41043], [313.08905, 371.15118]])
-
-            # dlib: left_eye: 36:41  right_eye: 42:47  nose: 30,32,33,34  left mouth corner: 48  right mouth corner: 54
-            # self.face_template = np.array([[193.65928, 242.98541], [318.32558, 243.06108], [255.67984, 328.82894],
-            #                                 [198.22603, 372.82502], [313.91018, 372.75659]])
+        self.face_template = np.array([[192.98138, 239.94708], [318.90277, 240.1936], [256.63416, 314.01935],
+                                       [201.26117, 371.41043], [313.08905, 371.15118]])
 
         self.face_template = self.face_template * (face_size / 512.0)
         if self.crop_ratio[0] > 1:
@@ -101,8 +76,8 @@ class CFaceRestoration(object):
             self.face_template[:, 0] += face_size * (self.crop_ratio[1] - 1) / 2
         self.save_ext = save_ext
         self.pad_blur = pad_blur
-        if self.pad_blur is True:
-            self.template_3points = False
+        # if self.pad_blur is True:
+        #     self.template_3points = False
 
         self.all_landmarks_5 = []
         self.det_faces = []
@@ -111,29 +86,16 @@ class CFaceRestoration(object):
         self.cropped_faces = []
         self.restored_faces = []
         self.pad_input_imgs = []
+        self.device = device
 
-        if device is None:
-            # self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            self.device = get_device()
-        else:
-            self.device = device
-
-        # init face detection model
-        if self.det_model == 'dlib':
-            self.face_detector, self.shape_predictor_5 = self.init_dlib(dlib_model_url['face_detector'], dlib_model_url['shape_predictor_5'])
-        else:
-            self.face_detector = init_detection_model(det_model, half=False, device=self.device)
-
-        # init face parsing model
+        # init detection model
+        self.face_detector = init_detection_model(det_model, half=False, device=self.device)
+        # init parsing model
         self.use_parse = use_parse
         self.face_parse = g_CFaceParsing.init_parsing_model(model_name='parsenet', device=self.device)
 
-    def set_upscale_factor(self, upscale_factor):
-        self.upscale_factor = upscale_factor
-
     def read_image(self, img):
-        """img can be image path or cv2 loaded image."""
-        # self.input_img is Numpy array, (h, w, c), BGR, uint8, [0, 255]
+
         if isinstance(img, str):
             img = cv2.imread(img)
 
@@ -145,57 +107,13 @@ class CFaceRestoration(object):
             img = img[:, :, 0:3]
 
         self.input_img = img
-        self.is_gray = g_CFaceUtils.is_gray(img, threshold=10)
-        if self.is_gray:
+        self.checkgray = g_CFaceUtils.checkgray(img, threshold=10)
+        if self.checkgray:
             print('Grayscale input: True')
 
         if min(self.input_img.shape[:2])<512:
             f = 512.0/min(self.input_img.shape[:2])
             self.input_img = cv2.resize(self.input_img, (0,0), fx=f, fy=f, interpolation=cv2.INTER_LINEAR)
-
-    def init_dlib(self, detection_path, landmark5_path):
-        """Initialize the dlib detectors and predictors."""
-        try:
-            import dlib
-        except ImportError:
-            print('Please install dlib by running:' 'conda install -c conda-forge dlib')
-        detection_path = load_file_from_url(url=detection_path, model_dir='weights/dlib', progress=True, file_name=None)
-        landmark5_path = load_file_from_url(url=landmark5_path, model_dir='weights/dlib', progress=True, file_name=None)
-        face_detector = dlib.cnn_face_detection_model_v1(detection_path)
-        shape_predictor_5 = dlib.shape_predictor(landmark5_path)
-        return face_detector, shape_predictor_5
-
-    def get_face_landmarks_5_dlib(self,
-                                only_keep_largest=False,
-                                scale=1):
-        det_faces = self.face_detector(self.input_img, scale)
-
-        if len(det_faces) == 0:
-            print('No face detected. Try to increase upsample_num_times.')
-            return 0
-        else:
-            if only_keep_largest:
-                print('Detect several faces and only keep the largest.')
-                face_areas = []
-                for i in range(len(det_faces)):
-                    face_area = (det_faces[i].rect.right() - det_faces[i].rect.left()) * (
-                        det_faces[i].rect.bottom() - det_faces[i].rect.top())
-                    face_areas.append(face_area)
-                largest_idx = face_areas.index(max(face_areas))
-                self.det_faces = [det_faces[largest_idx]]
-            else:
-                self.det_faces = det_faces
-
-        if len(self.det_faces) == 0:
-            return 0
-
-        for face in self.det_faces:
-            shape = self.shape_predictor_5(self.input_img, face.rect)
-            landmark = np.array([[part.x, part.y] for part in shape.parts()])
-            self.all_landmarks_5.append(landmark)
-
-        return len(self.all_landmarks_5)
-
 
     def get_face_landmarks_5(self,
                              only_keep_largest=False,
@@ -203,9 +121,6 @@ class CFaceRestoration(object):
                              resize=None,
                              blur_ratio=0.01,
                              eye_dist_threshold=None):
-        if self.det_model == 'dlib':
-            return self.get_face_landmarks_5_dlib(only_keep_largest)
-
         if resize is None:
             scale = 1
             input_img = self.input_img
@@ -249,87 +164,15 @@ class CFaceRestoration(object):
             self.det_faces, center_idx = get_center_face(self.det_faces, h, w)
             self.all_landmarks_5 = [self.all_landmarks_5[center_idx]]
 
-        # pad blurry images
-        if self.pad_blur:
-            self.pad_input_imgs = []
-            for landmarks in self.all_landmarks_5:
-                # get landmarks
-                eye_left = landmarks[0, :]
-                eye_right = landmarks[1, :]
-                eye_avg = (eye_left + eye_right) * 0.5
-                mouth_avg = (landmarks[3, :] + landmarks[4, :]) * 0.5
-                eye_to_eye = eye_right - eye_left
-                eye_to_mouth = mouth_avg - eye_avg
-
-                # Get the oriented crop rectangle
-                # x: half width of the oriented crop rectangle
-                x = eye_to_eye - np.flipud(eye_to_mouth) * [-1, 1]
-                #  - np.flipud(eye_to_mouth) * [-1, 1]: rotate 90 clockwise
-                # norm with the hypotenuse: get the direction
-                x /= np.hypot(*x)  # get the hypotenuse of a right triangle
-                rect_scale = 1.5
-                x *= max(np.hypot(*eye_to_eye) * 2.0 * rect_scale, np.hypot(*eye_to_mouth) * 1.8 * rect_scale)
-                # y: half height of the oriented crop rectangle
-                y = np.flipud(x) * [-1, 1]
-
-                # c: center
-                c = eye_avg + eye_to_mouth * 0.1
-                # quad: (left_top, left_bottom, right_bottom, right_top)
-                quad = np.stack([c - x - y, c - x + y, c + x + y, c + x - y])
-                # qsize: side length of the square
-                qsize = np.hypot(*x) * 2
-                border = max(int(np.rint(qsize * 0.1)), 3)
-
-                # get pad
-                # pad: (width_left, height_top, width_right, height_bottom)
-                pad = (int(np.floor(min(quad[:, 0]))), int(np.floor(min(quad[:, 1]))), int(np.ceil(max(quad[:, 0]))),
-                       int(np.ceil(max(quad[:, 1]))))
-                pad = [
-                    max(-pad[0] + border, 1),
-                    max(-pad[1] + border, 1),
-                    max(pad[2] - self.input_img.shape[0] + border, 1),
-                    max(pad[3] - self.input_img.shape[1] + border, 1)
-                ]
-
-                if max(pad) > 1:
-                    # pad image
-                    pad_img = np.pad(self.input_img, ((pad[1], pad[3]), (pad[0], pad[2]), (0, 0)), 'reflect')
-                    # modify landmark coords
-                    landmarks[:, 0] += pad[0]
-                    landmarks[:, 1] += pad[1]
-                    # blur pad images
-                    h, w, _ = pad_img.shape
-                    y, x, _ = np.ogrid[:h, :w, :1]
-                    mask = np.maximum(1.0 - np.minimum(np.float32(x) / pad[0],
-                                                       np.float32(w - 1 - x) / pad[2]),
-                                      1.0 - np.minimum(np.float32(y) / pad[1],
-                                                       np.float32(h - 1 - y) / pad[3]))
-                    blur = int(qsize * blur_ratio)
-                    if blur % 2 == 0:
-                        blur += 1
-                    blur_img = cv2.boxFilter(pad_img, 0, ksize=(blur, blur))
-                    # blur_img = cv2.GaussianBlur(pad_img, (blur, blur), 0)
-
-                    pad_img = pad_img.astype('float32')
-                    pad_img += (blur_img - pad_img) * np.clip(mask * 3.0 + 1.0, 0.0, 1.0)
-                    pad_img += (np.median(pad_img, axis=(0, 1)) - pad_img) * np.clip(mask, 0.0, 1.0)
-                    pad_img = np.clip(pad_img, 0, 255)  # float32, [0, 255]
-                    self.pad_input_imgs.append(pad_img)
-                else:
-                    self.pad_input_imgs.append(np.copy(self.input_img))
 
         return len(self.all_landmarks_5)
 
     def align_warp_face(self, save_cropped_path=None, border_mode='constant'):
-        """Align and warp faces with face template.
-        """
-        if self.pad_blur:
-            assert len(self.pad_input_imgs) == len(
-                self.all_landmarks_5), f'Mismatched samples: {len(self.pad_input_imgs)} and {len(self.all_landmarks_5)}'
+
+        # if self.pad_blur:
+        #     assert len(self.pad_input_imgs) == len(
+        #         self.all_landmarks_5), f'Mismatched samples: {len(self.pad_input_imgs)} and {len(self.all_landmarks_5)}'
         for idx, landmark in enumerate(self.all_landmarks_5):
-            # use 5 landmarks to get affine matrix
-            # use cv2.LMEDS method for the equivalence to skimage transform
-            # ref: https://blog.csdn.net/yichxi/article/details/115827338
             affine_matrix = cv2.estimateAffinePartial2D(landmark, self.face_template, method=cv2.LMEDS)[0]
             self.affine_matrices.append(affine_matrix)
             # warp and crop faces
@@ -353,7 +196,7 @@ class CFaceRestoration(object):
                 g_CFaceUtils.imwrite(cropped_face, save_path)
 
     def get_inverse_affine(self, save_inverse_affine_path=None):
-        """Get inverse affine matrix."""
+
         for idx, affine_matrix in enumerate(self.affine_matrices):
             inverse_affine = cv2.invertAffineTransform(affine_matrix)
             inverse_affine *= self.upscale_factor
@@ -366,20 +209,19 @@ class CFaceRestoration(object):
 
 
     def add_restored_face(self, restored_face, input_face=None):
-        if self.is_gray:
+        if self.checkgray:
             restored_face = bgr2gray(restored_face) # convert img into grayscale
             if input_face is not None:
                 restored_face = adain_npy(restored_face, input_face) # transfer the color
+
         self.restored_faces.append(restored_face)
 
 
-    def paste_faces_to_input_image(self, save_path=None, upsample_img=None, draw_box=False, face_upsampler=None):
+    def paste_orgimage(self, save_path=None, upsample_img=None, draw_box=False, face_upsampler=None):
         h, w, _ = self.input_img.shape
         h_up, w_up = int(h * self.upscale_factor), int(w * self.upscale_factor)
 
         if upsample_img is None:
-            # simply resize the background
-            # upsample_img = cv2.resize(self.input_img, (w_up, h_up), interpolation=cv2.INTER_LANCZOS4)
             upsample_img = cv2.resize(self.input_img, (w_up, h_up), interpolation=cv2.INTER_LINEAR)
         else:
             upsample_img = cv2.resize(upsample_img, (w_up, h_up), interpolation=cv2.INTER_LANCZOS4)
@@ -395,7 +237,7 @@ class CFaceRestoration(object):
                 inverse_affine[:, 2] *= self.upscale_factor
                 face_size = (self.face_size[0]*self.upscale_factor, self.face_size[1]*self.upscale_factor)
             else:
-                # Add an offset to inverse affine matrix, for more precise back alignment
+                # Add an offset to inverse affine matrix,
                 if self.upscale_factor > 1:
                     extra_offset = 0.5 * self.upscale_factor
                 else:
@@ -404,15 +246,16 @@ class CFaceRestoration(object):
                 face_size = self.face_size
             inv_restored = cv2.warpAffine(restored_face, inverse_affine, (w_up, h_up))
 
-
             # always use square mask
             mask = np.ones(face_size, dtype=np.float32)
             inv_mask = cv2.warpAffine(mask, inverse_affine, (w_up, h_up))
+
             # remove the black borders
             inv_mask_erosion = cv2.erode(
                 inv_mask, np.ones((int(2 * self.upscale_factor), int(2 * self.upscale_factor)), np.uint8))
             pasted_face = inv_mask_erosion[:, :, None] * inv_restored
             total_face_area = np.sum(inv_mask_erosion)  # // 3
+
             # add border
             if draw_box:
                 h, w = face_size
@@ -421,6 +264,7 @@ class CFaceRestoration(object):
                 mask_border[border:h-border, border:w-border,:] = 0
                 inv_mask_border = cv2.warpAffine(mask_border, inverse_affine, (w_up, h_up))
                 inv_mask_borders.append(inv_mask_border)
+
             # compute the fusion edge based on the area of face
             w_edge = int(total_face_area**0.5) // 20
             erosion_radius = w_edge * 2
@@ -493,7 +337,7 @@ class CFaceRestoration(object):
             g_CFaceUtils.imwrite(upsample_img, save_path)
         return upsample_img
 
-    def clean_all(self):
+    def init(self):
         self.all_landmarks_5 = []
         self.restored_faces = []
         self.affine_matrices = []
